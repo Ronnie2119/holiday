@@ -1,0 +1,238 @@
+from tqdm import tqdm
+import asyncio
+from pyppeteer2 import launch
+import csv
+import json
+import os
+
+
+async def main():
+    browser = await launch(headless=False, args=['--start-maximized'])
+    page = await browser.newPage()
+
+    await page.setViewport({"width": 1920, "height": 1080})
+
+    async def take_screenshot(page, step_name):
+        await page.screenshot({'path': f'{step_name}.png'})
+        print(f"Screenshot at {step_name} taken!")
+
+    async def debug_log(content, file_name):
+        with open(file_name, 'w', encoding='utf-8') as f:
+            f.write(content)
+        print(f"Debug log written to {file_name}!")
+
+    # Load previous results
+    previous_results_file = 'previous_results.json'
+    previous_results = {}
+    if os.path.exists(previous_results_file):
+        with open(previous_results_file, 'r', encoding='utf-8') as f:
+            previous_results = json.load(f)
+    current_results = []
+
+    def compare_cost(current, previous):
+        if 'cost' in current and 'cost' in previous:
+            return current['cost'] != previous['cost']
+        return False
+
+    try:
+        await page.goto('https://www.tui.co.uk/holidays/last-minute?tui-product-cards.0.filter-hash=f91855d1f3543f35d71b1a800f08386cc71d081d', {'waitUntil': 'networkidle2', 'timeout': 120000})
+        print("Navigated to initial page.")
+        await take_screenshot(page, 'initial_load')
+
+        await page.waitForXPath('//*[@id="cmDecline"]', {'timeout': 120000})
+        print("Cookie decline button located.")
+        await page.evaluate('''() => {
+            const button = document.evaluate('//*[@id="cmDecline"]', document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
+            if (button) button.click();
+        }''')
+        print("Cookie decline button clicked!")
+        await asyncio.sleep(3)
+        print("Waited for dynamic content to load.")
+        await take_screenshot(page, 'after_click')
+
+        selector = 'div.products-wrapper__pagination-label'
+
+        async def load_all_results():
+            has_more_items = True
+            attempt = 0
+            while has_more_items:
+                attempt += 1
+                print(f"Load attempt {attempt}")
+                try:
+                    await page.evaluate('''(selector) => {
+                        const hostElement = document.querySelector('tui-product-cards');
+                        if (!hostElement) return;
+                        const shadowRoot = hostElement.shadowRoot;
+                        if (!shadowRoot) return;
+                        shadowRoot.querySelector(selector).scrollIntoView();
+                        window.scrollBy(0, -50);
+                    }''', selector)
+                    print("Scrolled down to bottom of the page.")
+                    await asyncio.sleep(3)
+                    await page.evaluate('''(selector) => {
+                        const hostElement = document.querySelector('tui-product-cards');
+                        if (!hostElement) return;
+                        const shadowRoot = hostElement.shadowRoot;
+                        if (!shadowRoot) return;
+                        const button = shadowRoot.querySelector('div.products-wrapper__pagination-wrapper-bottom button');
+                        if (button) button.click();
+                    }''', selector)
+                    print("Clicked 'Load More' button.")
+                    await asyncio.sleep(5)
+
+                    has_more_items = await page.evaluate('''(selector) => {
+                        const hostElement = document.querySelector('tui-product-cards');
+                        if (!hostElement) return false;
+                        const shadowRoot = hostElement.shadowRoot;
+                        if (!shadowRoot) return false;
+                        const button = shadowRoot.querySelector('div.products-wrapper__pagination-wrapper-bottom button');
+                        return button !== null;
+                    }''', selector)
+
+                    await take_screenshot(page, f'scroll_to_bottom_{attempt}')
+
+                except Exception as e:
+                    print(f"Error on load attempt {attempt}: {e}")
+                    has_more_items = False
+
+        await load_all_results()
+
+        links = await page.evaluate('''() => {
+            const hostElement = document.querySelector('tui-product-cards');
+            if (!hostElement) return [];
+            const shadowRoot = hostElement.shadowRoot;
+            if (!shadowRoot) return [];
+            return Array.from(shadowRoot.querySelectorAll('a.product-card__continue-button')).map(el => el.href);
+        }''')
+        print(f"Found {len(links)} 'more details' links!")
+
+        await take_screenshot(page, 'after_all_results_loaded')
+
+        await debug_log('\n'.join(links), 'debug_links.txt')
+
+        print(f"Found {len(links)} 'more details' links!")
+
+        results = []
+        with tqdm(total=len(links), desc='Processing hotels') as pbar:
+            for index, link in enumerate(links):
+                try:
+                    print(f"Processing link: {link}")
+                    await page.goto(link, {'waitUntil': 'networkidle2', 'timeout': 150000})
+                    await asyncio.sleep(3)
+                    await page.waitForSelector('body', {'timeout': 150000})
+                    print("Navigated to 'more details' link and body selector ready.")
+                    await take_screenshot(page, f'link_{index}_loaded')
+
+                    is_adults_only = await page.evaluate('''() => {
+                        return document.body.innerText.toLowerCase().includes('adults-only');
+                    }''')
+                    print(f"Adults-only check result: {is_adults_only}")
+
+                    is_kids = False
+                    highlights = await page.evaluate('''() => {
+                        return Array.from(document.querySelectorAll('div.Facilities__highlights li')).map(el => el.innerText);
+                    }''')
+                    for i, highlight in enumerate(highlights):
+                        if "kids" in highlight.lower():
+                            is_kids = True
+                            print(f"Kids-pools check result: {highlight}")
+
+                    if is_adults_only and not is_kids:
+                        trip_advisor = await page.evaluate('''() => {
+                            const review = document.querySelector('span.TripAdvisorReviewRating__ratigsScoreFraction');
+                            return review ? parseFloat(review.textContent) : 0;
+                        }''')
+                        print(f"TripAdvisor Rating: {trip_advisor}")
+
+                        if trip_advisor >= 4.5:
+                            hotel = await page.evaluate('''() => {
+                                const element = document.querySelector('.Header__headerTitle h1 span');
+                                return element ? element.textContent : null;
+                            }''')
+                            location = await page.evaluate('''() => {
+                                const element = document.querySelector('.Header__locationBreadCrumb span span');
+                                return element ? element.textContent : null;
+                            }''')
+                            cost = await page.evaluate('''() => {
+                                const currency = document.querySelector('.ProgressbarNavigation__currency');
+                                const ppPart1 = document.querySelector('.ProgressbarNavigation__ppPart1');
+                                const ppPart2 = document.querySelector('.ProgressbarNavigation__ppPart2');
+                                const ppPrice = document.querySelector('.ProgressbarNavigation__ppPrice');
+                                if (currency && ppPart1 && ppPart2 && ppPrice) {
+                                    return `${currency.textContent}${ppPart1.textContent}.${ppPart2.textContent}${ppPrice.textContent}`;
+                                }
+                                return 'N/A';
+                            }''')
+                            reviews_count = await page.evaluate('''() => {
+                                const reviewCountElement = document.querySelector('.TripAdvisorReviewRating__ratingCount');
+                                return reviewCountElement ? reviewCountElement.textContent : 'N/A';
+                            }''')
+                            airport = await page.evaluate('''() => {
+                                const hostElement = document.querySelector('tui-alternative-dates');
+                                if (!hostElement) return null;
+                                const shadowRoot = hostElement.shadowRoot;
+                                if (!shadowRoot) return null;
+                                const element = shadowRoot.querySelector('.departure-airport .airport');
+                                return element ? element.textContent : null;
+                            }''')
+
+                            result = {
+                                'hotel': hotel,
+                                'location': location,
+                                'cost': cost,
+                                'trip advisor rating': trip_advisor,
+                                'reviews count': reviews_count,
+                                'airport': airport,
+                                'link': link
+                            }
+
+                            if link in previous_results:
+                                previous_result = previous_results[link]
+                                if compare_cost(result, previous_result):
+                                    result['previous cost'] = previous_result['cost']
+                                else:
+                                    result['previous cost'] = 'Same as current'
+
+                            results.append(result)
+                            await take_screenshot(page, f'link_{index}_adults_only')
+                        else:
+                            print("TripAdvisor rating is below 4.5. Skipping hotel.")
+                    else:
+                        print("No adults-only content found on this page.")
+
+                except Exception as e:
+                    print(f"Error processing link {link}: {e}")
+
+        await browser.close()
+        print("Browser closed.")
+
+        for result in results:
+            print(result)
+
+        with open('results.txt', 'w', encoding='utf-8') as f:
+            for result in results:
+                f.write(f"{result}\n")
+        print("Results logged to results.txt.")
+
+        with open('results.csv', 'w', newline='', encoding='utf-8') as csvfile:
+            fieldnames = ['hotel', 'location', 'cost', 'previous cost', 'trip advisor rating', 'reviews count', 'airport', 'link']
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            writer.writeheader()
+            for result in results:
+                writer.writerow(result)
+        print("Results logged to results.csv.")
+
+        # Save current results for comparison in future runs
+        new_results_dict = {result['link']: result for result in results}
+        with open(previous_results_file, 'w', encoding='utf-8') as f:
+            json.dump(new_results_dict, f, ensure_ascii=False, indent=4)
+        print("Current results saved for future comparison.")
+
+    except Exception as e:
+        print(f"Error during processing: {e}")
+        await take_screenshot(page, 'error_occurred')
+        if browser:
+            await browser.close()
+        print("Browser closed due to error.")
+
+asyncio.run(main())
