@@ -1,6 +1,6 @@
 from tqdm import tqdm
 import asyncio
-from pyppeteer2 import launch
+from pyppeteer import launch
 import csv
 import json
 import os
@@ -50,7 +50,7 @@ async def main():
         print("Waited for dynamic content to load.")
         await take_screenshot(page, 'after_click')
 
-        selector = 'div.products-wrapper__pagination-label'
+        selector = 'div.products-view__pagination-label'
 
         async def load_all_results():
             has_more_items = True
@@ -74,7 +74,7 @@ async def main():
                         if (!hostElement) return;
                         const shadowRoot = hostElement.shadowRoot;
                         if (!shadowRoot) return;
-                        const button = shadowRoot.querySelector('div.products-wrapper__pagination-wrapper-bottom button');
+                        const button = shadowRoot.querySelector('div.products-view__pagination-bottom button');
                         if (button) button.click();
                     }''', selector)
                     print("Clicked 'Load More' button.")
@@ -85,7 +85,7 @@ async def main():
                         if (!hostElement) return false;
                         const shadowRoot = hostElement.shadowRoot;
                         if (!shadowRoot) return false;
-                        const button = shadowRoot.querySelector('div.products-wrapper__pagination-wrapper-bottom button');
+                        const button = shadowRoot.querySelector('div.products-view__pagination-bottom button');
                         return button !== null;
                     }''', selector)
 
