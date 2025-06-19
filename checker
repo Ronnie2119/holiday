@@ -102,7 +102,7 @@ async def main():
             if (!hostElement) return [];
             const shadowRoot = hostElement.shadowRoot;
             if (!shadowRoot) return [];
-            return Array.from(shadowRoot.querySelectorAll('a.product-card__continue-button')).map(el => el.href);
+            return Array.from(shadowRoot.querySelectorAll('a.product-continue-button')).map(el => el.href);
         }''')
         print(f"Found {len(links)} 'more details' links!")
 
